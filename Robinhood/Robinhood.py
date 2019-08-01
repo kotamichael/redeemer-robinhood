@@ -15,6 +15,9 @@ import getpass
 import requests
 import six
 import dateutil
+import time
+import random
+import hmac, base64, struct, hashlib
 
 #Application-specific imports
 from . import exceptions as RH_exception
@@ -67,7 +70,9 @@ class Robinhood:
             "User-Agent": "Robinhood/823 (iPhone; iOS 7.1.2; Scale/2.00)"
         }
         self.session.headers = self.headers
-        self.auth_method = self.login_prompt
+        self.device_token = ""
+        self.challenge_id = ""
+        #self.auth_method = self.login_prompt maybe get rid of this
 
     def login_required(function):  # pylint: disable=E0213
         """ Decorator function that prompts user for login if they are not logged in already. Can be applied to any function using the @ notation. """
@@ -85,20 +90,38 @@ class Robinhood:
 
         return self.login(username=username, password=password)
 
+    def GenerateDeviceToken(self):
+        rands = []
+        for i in range(0,16):
+            r = random.random()
+            rand = 4294967296.0 * r
+            rands.append((int(rand) >> ((3 & i) << 3)) & 255)
+
+        hexa = []
+        for i in range(0,256):
+            hexa.append(str(hex(i+256)).lstrip("0x").rstrip("L")[1:])
+
+        id = ""
+        for i in range(0,16):
+            id += hexa[rands[i]]
+
+            if (i == 3) or (i == 5) or (i == 7) or (i == 9):
+                id += "-"
+
+        self.device_token = id
 
     def login(self,
               username,
               password,
               mfa_code=None):
         """Save and test login info for Robinhood accounts
-
         Args:
             username (str): username
             password (str): password
-
+            qr_code (str): QR code that will be used to generate mfa_code (optional but recommended)
+            To get QR code, set up 2FA in Security, get Authentication App, and click "Can't Scan It?"
         Returns:
             (bool): received valid auth token
-
         """
 
         self.username = username
@@ -110,23 +133,67 @@ class Robinhood:
         }
 
         if mfa_code:
-            payload['mfa_code'] = mfa_code
-        try:
-            res = self.session.post(endpoints.login(), data=payload, timeout=15)
-            res.raise_for_status()
-            data = res.json()
-        except requests.exceptions.HTTPError:
-            raise RH_exception.LoginFailed()
+            self.mfa_code = mfa_code
+            payload = {
+                'password': self.password,
+                'username': self.username,
+                'grant_type': 'password',
+                'client_id': "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS",
+                'scope': 'internal',
+                'device_token': self.device_token,
+                'mfa_code': mfa_code
+            }
+            try:
+                res = self.session.post(endpoints.login(), data=payload, timeout=15)
+                data = res.json()
 
-        if 'mfa_required' in data.keys():           # pragma: no cover
-            mfa_code = input("MFA: ")
-            return self.login(username,password,mfa_code)
+                if 'access_token' in data.keys() and 'refresh_token' in data.keys():
+                    self.auth_token = data['access_token']
+                    self.refresh_token = data['refresh_token']
+                    self.headers['Authorization'] = 'Bearer ' + self.auth_token
+                    return True
 
-        if 'access_token' in data.keys() and 'refresh_token' in data.keys():
-            self.auth_token = data['access_token']
-            self.refresh_token = data['refresh_token']
-            self.headers['Authorization'] = 'Bearer ' + self.auth_token
-            return True
+            except requests.exceptions.HTTPError:
+                raise RH_exception.LoginFailed()
+
+        else:
+            payload = {
+                'password': self.password,
+                'username': self.username,
+                'grant_type': 'password',
+                'client_id': "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS",
+                'expires_in': '86400',
+                'scope': 'internal',
+                'device_token': self.device_token,
+                'challenge_type': 'sms'
+            }
+
+            try:
+                res = self.session.post(endpoints.login(), data=payload, timeout=15)
+                response_data = res.json()
+                if self.challenge_id == "" and "challenge" in response_data.keys():
+                    self.challenge_id = response_data["challenge"]["id"]
+                self.headers["X-ROBINHOOD-CHALLENGE-RESPONSE-ID"] = self.challenge_id #has to add this to stay logged in
+                sms_challenge_endpoint = "https://api.robinhood.com/challenge/{}/respond/".format(self.challenge_id)
+                print("No 2FA Given")
+                print("SMS Code:")
+                self.sms_code = input()
+                challenge_res = {"response":self.sms_code}
+                res2 = self.session.post(sms_challenge_endpoint, data=challenge_res, timeout=15)
+                res2.raise_for_status()
+                #gets access token for final response to stay logged in
+                res3 = self.session.post(endpoints.login(), data=payload, timeout=15)
+                res3.raise_for_status()
+                data = res3.json()
+
+                if 'access_token' in data.keys() and 'refresh_token' in data.keys():
+                    self.auth_token = data['access_token']
+                    self.refresh_token = data['refresh_token']
+                    self.headers['Authorization'] = 'Bearer ' + self.auth_token
+                    return True
+
+            except requests.exceptions.HTTPError:
+                raise RH_exception.LoginFailed()
 
         return False
 

@@ -350,7 +350,7 @@ class Robinhood:
 
         #Check for validity of symbol
         try:
-            req = self.session.get(url, headers=self.headers, timeout=15)
+            req = self.session.get(url, headers=self.headers, timeout=15, verify=False)
             req.raise_for_status()
             data = req.json()
         except requests.exceptions.HTTPError:
@@ -375,7 +375,7 @@ class Robinhood:
         url = str(endpoints.quotes()) + "?symbols=" + ",".join(stocks)
 
         try:
-            req = self.session.get(url, timeout=15)
+            req = self.session.get(url, timeout=15, verify=False)
             req.raise_for_status()
             data = req.json()
         except requests.exceptions.HTTPError:
